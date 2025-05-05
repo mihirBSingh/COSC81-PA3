@@ -3,17 +3,17 @@
 # Author: AQL
 # Date: 2025/03/31
 
+# imports
 import numpy as np
 import tf_transformations
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PoseStamped, PoseArray
-from geometry_msgs.msg import Twist 
+from geometry_msgs.msg import PoseStamped, PoseArray, Twist
 from collections import deque, defaultdict
 from typing import List, Tuple, Dict
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
+# topics
 NODE_NAME = "planner"
 MAP_TOPIC = "map"
 POSE_TOPIC = "pose"
@@ -21,9 +21,11 @@ POSE_SEQUENCE_TOPIC = "pose_sequence"
 MAP_FRAME_ID = "map"
 USE_SIM_TIME = True
 
+# constants
 FREQUENCY = 10 #Hz.
 ANGULAR_VELOCITY = np.pi/4 # rad/s
 LINEAR_VELOCITY = 0.125 # m/s
+GRID_OFFSET = 3 # number of grids - padding for the robot to not hit the wall
 
 class Grid:
     def __init__(self, occupancy_grid_data, width, height, resolution):
@@ -35,8 +37,51 @@ class Grid:
     def cell_at(self, r, c):
         return self.grid[r, c]
 
+    # def is_valid(self, r, c):
+    #     # padding so robot does not hit the wall
+    #     valid = True
+    #     if r < 0 or r >= self.height or c < 0 or c >= self.width:
+    #         valid = False
+    #     elif self.cell_at(r, c) == 100:
+    #         valid = False
+    #     elif self.cell_at(r+GRID_OFFSET, c+GRID_OFFSET) == 100 or self.cell_at(r+GRID_OFFSET, c) == 100 or self.cell_at(r+GRID_OFFSET, c+GRID_OFFSET) == 100 or self.cell_at(r+GRID_OFFSET, c-GRID_OFFSET) == 100:
+    #         valid = False
+    #     elif self.cell_at(r-GRID_OFFSET, c-GRID_OFFSET) == 100 or self.cell_at(r, c-GRID_OFFSET) == 100 or self.cell_at(r-GRID_OFFSET, c) == 100 or self.cell_at(r-GRID_OFFSET, c+GRID_OFFSET) == 100:
+    #         valid = False
+    #     # return 0 <= r < self.height and 0 <= c < self.width and self.cell_at(r, c) != 100
+    #     return valid
+    
     def is_valid(self, r, c):
-        return 0 <= r < self.height and 0 <= c < self.width and self.cell_at(r, c) != 100
+        # check if outside boundaries first
+        if r < 0 or r >= self.height or c < 0 or c >= self.width:
+            return False
+
+        # check  current cell
+        if self.cell_at(r, c) == 100:
+            return False
+
+        # define offset neighbors to check
+        offsets = [
+            (GRID_OFFSET, GRID_OFFSET),
+            (GRID_OFFSET, 0),
+            (GRID_OFFSET, -GRID_OFFSET),
+            (0, GRID_OFFSET),
+            (0, -GRID_OFFSET),
+            (-GRID_OFFSET, -GRID_OFFSET),
+            (-GRID_OFFSET, 0),
+            (-GRID_OFFSET, GRID_OFFSET),
+        ]
+
+        # check if any neighbor cell equals 100 (and is thus a wall)
+        for dr, dc in offsets:
+            rr, cc = r + dr, c + dc
+            # check boundaries here to avoid errors:
+            if 0 <= rr < self.height and 0 <= cc < self.width:
+                if self.cell_at(rr, cc) == 100:
+                    return False
+
+        # if all checks pass
+        return True
 
 class Plan(Node):
     def __init__(self, map_frame_id=MAP_FRAME_ID, node_name=NODE_NAME, context=None):
