@@ -12,13 +12,18 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseStamped, PoseArray, Twist
 from collections import deque, defaultdict
 from typing import List, Tuple, Dict
+import tf2_ros
 
 # topics
 NODE_NAME = "planner"
 MAP_TOPIC = "map"
 POSE_TOPIC = "pose"
 POSE_SEQUENCE_TOPIC = "pose_sequence"
+
+# ref frames
 MAP_FRAME_ID = "map"
+BASE_LINK_FRAME_ID = "rosbot/base_link"
+
 USE_SIM_TIME = True
 
 # constants
@@ -36,20 +41,6 @@ class Grid:
 
     def cell_at(self, r, c):
         return self.grid[r, c]
-
-    # def is_valid(self, r, c):
-    #     # padding so robot does not hit the wall
-    #     valid = True
-    #     if r < 0 or r >= self.height or c < 0 or c >= self.width:
-    #         valid = False
-    #     elif self.cell_at(r, c) == 100:
-    #         valid = False
-    #     elif self.cell_at(r+GRID_OFFSET, c+GRID_OFFSET) == 100 or self.cell_at(r+GRID_OFFSET, c) == 100 or self.cell_at(r+GRID_OFFSET, c+GRID_OFFSET) == 100 or self.cell_at(r+GRID_OFFSET, c-GRID_OFFSET) == 100:
-    #         valid = False
-    #     elif self.cell_at(r-GRID_OFFSET, c-GRID_OFFSET) == 100 or self.cell_at(r, c-GRID_OFFSET) == 100 or self.cell_at(r-GRID_OFFSET, c) == 100 or self.cell_at(r-GRID_OFFSET, c+GRID_OFFSET) == 100:
-    #         valid = False
-    #     # return 0 <= r < self.height and 0 <= c < self.width and self.cell_at(r, c) != 100
-    #     return valid
     
     def is_valid(self, r, c):
         # check if outside boundaries first
@@ -96,13 +87,15 @@ class Plan(Node):
         
         # Rate at which to operate the while loop.
         self.rate = self.create_rate(FREQUENCY)
-
-        # self.sub = self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, 1)
-        # qos_profile = QoSProfile(depth=10)
-        # qos_profile.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
-        self.sub = self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, 10)
         
-        # for pose sequences
+        # for transforms
+        self.tf_buffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        # subscribers
+        self._map_sub = self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, 10)
+        
+        # publishers
         self.pose_pub = self.create_publisher(PoseStamped, POSE_TOPIC, 10)
         self.pose_array_pub = self.create_publisher(PoseArray, POSE_SEQUENCE_TOPIC, 10)
         
@@ -134,6 +127,17 @@ class Plan(Node):
         self.occupancy_grid = msg
         print(f"Got map: {msg.info.width}x{msg.info.height}, resolution: {msg.info.resolution}")
 
+    # adapted from class lecture code about transformation
+    def find_start_pose(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(MAP_FRAME_ID, BASE_LINK_FRAME_ID,  rclpy.time.Time(), rclpy.duration.Duration(seconds=1.0))
+            x = transform.transform.translation.x
+            y = transform.transform.translation.y
+            return (x, y)
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+            print(f"cannot get current pose: {e}")
+            return None
+    
     def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
         x_rel = x - self.map_origin.position.x
         y_rel = y - self.map_origin.position.y
@@ -146,20 +150,21 @@ class Plan(Node):
         y = row * self.map.resolution + self.map_origin.position.y + self.map.resolution / 2
         return x, y
 
+    # BFS or DFS algorithm to find path from start to goal position
     def find_path(self, start_pos: Tuple[float, float], goal_pos: Tuple[float, float], algorithm: str = "BFS") -> List[PoseStamped]:
         
-        # if no map then create one
+        # if no map then get one
         if not self.map:
+            print("had to get map")
             self.map = Grid(self.occupancy_grid.data, self.occupancy_grid.info.width, 
                            self.occupancy_grid.info.height, self.occupancy_grid.info.resolution)
             self.map_origin = self.occupancy_grid.info.origin
-        print("Map received")
 
-        # Convert world coordinates to grid coordinates
+        # convert world to grid coords
         start_row, start_col = self.world_to_grid(start_pos[0], start_pos[1])
         goal_row, goal_col = self.world_to_grid(goal_pos[0], goal_pos[1])
 
-        # Validate start and goal positions
+        # validate start and goal positions
         if not self.map.is_valid(start_row, start_col) or not self.map.is_valid(goal_row, goal_col):
             first = not self.map.is_valid(start_row, start_col)
             second = not self.map.is_valid(goal_row, goal_col)
@@ -168,7 +173,7 @@ class Plan(Node):
 
         # data structures for BFS and DFS
         visited = set()
-        parent = {}  # Store parent nodes for path reconstruction
+        parent = {} 
         if algorithm == "BFS":
             frontier = deque([(start_row, start_col)])
         else:  # DFS
@@ -181,7 +186,7 @@ class Plan(Node):
         directions =  [(1, 0), (0, -1), (-1, 0), (0, 1), (1, 1), (-1, -1), (-1, 1), (1, -1)] 
         print("Start searching...")
         
-        # Search
+        # search using algorithm selected
         while frontier:
             if algorithm == "BFS":
                 current = frontier.popleft()
@@ -232,41 +237,44 @@ class Plan(Node):
                 angle = np.arctan2(next_y - y, next_x - x)
                 quaternion = tf_transformations.quaternion_from_euler(0, 0, angle)
                 
-                # print(pose.pose)
-                # print("thee quaternion", quaternion)
                 pose.pose.orientation.x = quaternion[0]
                 pose.pose.orientation.y = quaternion[1]
                 pose.pose.orientation.z = quaternion[2]
-                pose.pose.orientation.w = quaternion[3]
-                # print(type(pose), pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w)
+                pose.pose.orientation.w = quaternion[3]      
             else:
                 # Use previous orientation for last point
                 quaternion = poses[-1].pose.orientation if poses else tf_transformations.quaternion_from_euler(0, 0, 0)
             
-                # print(pose.pose)
-                # print("this quaternion", quaternion)
                 pose.pose.orientation.x = quaternion.x
                 pose.pose.orientation.y = quaternion.y
                 pose.pose.orientation.z = quaternion.z
                 pose.pose.orientation.w = quaternion.w
-                # print(type(pose), pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w)
             
             poses.append(pose)
-
-        print(len(poses), "poses")
+            
+        # publish poses
+        self.publish_pose_sequence(poses)
+            
+        return poses
+    
+    # sequence of poses for robot to go from start to goal position
+    def publish_pose_sequence(self, poses):
         # Publish the path as a PoseArray
         pose_array_msg = PoseArray()
         pose_array_msg.header.stamp = self.get_clock().now().to_msg()
         pose_array_msg.header.frame_id = self.map_frame_id
         pose_array_msg.poses = [pose.pose for pose in poses]
+        
+        # Print the poses for debugging
         for i, pose in enumerate(pose_array_msg.poses):
             print(f"Pose {i}: ({pose.position.x}, {pose.position.y}), Orientation: ({pose.orientation.x}, {pose.orientation.y}, {pose.orientation.z}, {pose.orientation.w})")
         print("pose array", len(pose_array_msg.poses))
+        
+        # publish the PoseArray message
         self.pose_array_pub.publish(pose_array_msg)
-        print("Path published")
-        return poses
 
-    def publish_pose(self):
+    # just to see individual poses - good for debugging/testing
+    def publish_individual_pose(self):
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.get_clock().now().to_msg()
         pose_msg.header.frame_id = self.map_frame_id
@@ -281,23 +289,57 @@ class Plan(Node):
 
         self.pose_pub.publish(pose_msg)
 
+    def spin(self):
+        while rclpy.ok():
+            # get user goal input
+            goal = input("Enter goal position (x,y) where for 0 < x and y < 200 and x and y are both floats: ")
+            x, y = goal.strip("() ").split(",")
+            x = float(x)
+            y = float(y)
+            if x < 0 or x > 200 or y < 0 or y > 200:
+                print("Invalid goal position. Using default goal position (5, 5).")
+                x = 5.0
+                y = 5.0
+            goal_pos = (x, y)
+            
+            # get algorithm
+            algorithm = input("Enter algorithm - choose 1 for BFS and 2 for DFS): ")
+            if algorithm == "1":
+                algorithm = "BFS"
+            elif algorithm == "2":
+                algorithm = "DFS"
+            else:
+                print("Invalid algorithm choice. Using BFS as default.")
+                algorithm = "BFS"
+                
+            # get start pose
+            start_pose = self.find_start_pose()
+            if start_pose is None:
+                print("error getting start pose")
+            
+            path_poses = self.find_path(start_pose, goal_pos, algorithm=algorithm)
+            print("got here")
+            
+            
+            
 def main(args=None):
     rclpy.init(args=args)
     p = Plan()
     
-    while rclpy.ok():
-        while p.occupancy_grid is None:
-            rclpy.spin_once(p)
-        if p.occupancy_grid is not None:
-            # Now safe to call find_path, for example from (0,0) to (5,5)
-            path_poses = p.find_path((1.0, 1.0), (1.0, 8.0), algorithm="BFS")
-            
-            print(f"Path length: {len(path_poses)}")
-            print("Path poses:")
-            for pose in path_poses:
-                print(f"Position: ({pose.pose.position.x}, {pose.pose.position.y}), Orientation: ({pose.pose.orientation.x}, {pose.pose.orientation.y}, {pose.pose.orientation.z}, {pose.pose.orientation.w})")
-            
-
+    # basically just wait to see if the map is received
+    while p.occupancy_grid is None:
+        rclpy.spin_once(p)
+    if p.occupancy_grid is not None:
+        rclpy.spin_once(p)
+        p.spin()
+        rclpy.spin_once(p)
+        
+        # Comment: Now safe to call find_path, for example from (0,0) to (5,5)
+        # path_poses = p.find_path((1.0, 1.0), (4.0, 1.75), algorithm="BFS")
+        # print(f"Path length: {len(path_poses)}")
+        # print("Path poses:")
+        # for pose in path_poses:
+        #     print(f"Position: ({pose.pose.position.x}, {pose.pose.position.y}), Orientation: ({pose.pose.orientation.x}, {pose.pose.orientation.y}, {pose.pose.orientation.z}, {pose.pose.orientation.w})")
 
     rclpy.shutdown()
 
