@@ -48,21 +48,30 @@ class Grid:
         return self.grid[r, c]
     
     def is_valid(self, r, c):
-        # Check if (r, c) is out of bounds
+        # check if coordinate itself is out of bounds
         if r < 0 or r >= self.height or c < 0 or c >= self.width:
             return False
 
-        # Check the current cell
+        # check if cell is wall
         if self.cell_at(r, c) == 100:
             return False
 
-        # Check all cells within the GRID_OFFSET square
-        for dr in range(-GRID_OFFSET, GRID_OFFSET + 1):
-            for dc in range(-GRID_OFFSET, GRID_OFFSET + 1):
-                rr, cc = r + dr, c + dc
-                if 0 <= rr < self.height and 0 <= cc < self.width:
-                    if self.cell_at(rr, cc) == 100:
-                        return False
+        # check all cells within the buffer distance (in pixels)
+        buffer_radius = 7
+        
+        # find search boundaries with buffer
+        min_row = max(0, r - buffer_radius)
+        max_row = min(self.height - 1, r + buffer_radius)
+        min_col = max(0, c - buffer_radius)
+        max_col = min(self.width - 1, c + buffer_radius)
+        
+        # check all cells within the buffer radius 
+        for rr in range(min_row, max_row + 1):
+            for cc in range(min_col, max_col + 1):
+                # euclidean distance
+                distance = np.sqrt((rr - r)**2 + (cc - c)**2)
+                if distance <= buffer_radius and self.cell_at(rr, cc) == 100:
+                    return False
 
         return True
 
@@ -171,14 +180,12 @@ class Plan(Node):
             self.stop()
             return
         
-        for i, target_pose in enumerate(poses):
-            # print(f"Moving to pose {i}: ({target_pose.pose.position.x:.3f}, {target_pose.pose.position.y:.3f})")
+        for target_pose in poses:
             
             while rclpy.ok():
                 # get current pose
                 try:
-                    transform = self.tf_buffer.lookup_transform(
-                        MAP_FRAME_ID, BASE_LINK_FRAME_ID, rclpy.time.Time(), Duration(seconds=1.0))
+                    transform = self.tf_buffer.lookup_transform(MAP_FRAME_ID, BASE_LINK_FRAME_ID, rclpy.time.Time(), Duration(seconds=1.0))
                     curr_x = transform.transform.translation.x
                     curr_y = transform.transform.translation.y
                     q = transform.transform.rotation
@@ -198,8 +205,6 @@ class Plan(Node):
                 distance = np.sqrt(dx**2 + dy**2)
 
                 # rotate
-                # if abs(angle_diff) > ANGLE_THRESHOLD:
-                #     print("asds")
                 self.rotate(angle_diff)
                 
                 # move forward if close enough in angle
@@ -208,7 +213,6 @@ class Plan(Node):
                         move_duration = distance / self.linear_velocity
                         self.move_forward(move_duration)
                     else:
-                        # print(f"Reached pose {i}")
                         self.stop()
                         break
                 
@@ -257,7 +261,7 @@ class Plan(Node):
         if not self.map.is_valid(start_row, start_col) or not self.map.is_valid(goal_row, goal_col):
             first = not self.map.is_valid(start_row, start_col)
             second = not self.map.is_valid(goal_row, goal_col)
-            print(f"Invalid start position: {first}, Invalid goal position: {second}")
+            print(f"Invalid start position: {first}, Invalid goal position: {second} (likely too close to wall - goal point is where center of robot is)")
             return []
 
         # data structures for BFS and DFS
