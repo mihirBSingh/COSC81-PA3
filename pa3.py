@@ -13,12 +13,15 @@ from geometry_msgs.msg import PoseStamped, PoseArray, Twist
 from collections import deque, defaultdict
 from typing import List, Tuple, Dict
 import tf2_ros
+import math
+from rclpy.duration import Duration
 
 # topics
 NODE_NAME = "planner"
 MAP_TOPIC = "map"
 POSE_TOPIC = "pose"
 POSE_SEQUENCE_TOPIC = "pose_sequence"
+DEFAULT_CMD_VEL_TOPIC = 'cmd_vel'
 
 # ref frames
 MAP_FRAME_ID = "map"
@@ -31,6 +34,8 @@ FREQUENCY = 10 #Hz.
 ANGULAR_VELOCITY = np.pi/4 # rad/s
 LINEAR_VELOCITY = 0.125 # m/s
 GRID_OFFSET = 3 # number of grids - padding for the robot to not hit the wall
+ANGLE_THRESHOLD = 0.1 # radians
+DISTANCE_THRESHOLD = 0.1 # meters
 
 class Grid:
     def __init__(self, occupancy_grid_data, width, height, resolution):
@@ -98,7 +103,8 @@ class Plan(Node):
         # publishers
         self.pose_pub = self.create_publisher(PoseStamped, POSE_TOPIC, 10)
         self.pose_array_pub = self.create_publisher(PoseArray, POSE_SEQUENCE_TOPIC, 10)
-        
+        self._cmd_pub = self.create_publisher(Twist, DEFAULT_CMD_VEL_TOPIC, 10)
+
         self.linear_velocity = LINEAR_VELOCITY
         self.angular_velocity = ANGULAR_VELOCITY
         
@@ -120,6 +126,47 @@ class Plan(Node):
         """Stop the robot."""
         twist_msg = Twist()
         self._cmd_pub.publish(twist_msg)
+        
+    # adapted from PA0
+    def rotate(self, angle):
+        duration = Duration(seconds=abs(angle/ANGULAR_VELOCITY))
+        angular_velocity = math.copysign(1, angle) * ANGULAR_VELOCITY
+        rclpy.spin_once(self)
+        
+        start_time = self.get_clock().now()
+        while rclpy.ok():
+            rclpy.spin_once(self)
+            # check if traveled given distance based on time
+            if self.get_clock().now() - start_time >= duration:
+                break
+            
+            # publish massage 
+            self.move(0.0, angular_velocity)
+            
+    # from lecture
+    def move_forward(self, duration):
+        """Function to move_forward for a given duration."""
+        # Setting velocities. 
+        twist_msg = Twist()
+        twist_msg.linear.x = LINEAR_VELOCITY
+
+        duration = Duration(seconds=duration)
+        rclpy.spin_once(self)
+        start_time = self.get_clock().now()
+
+        # Loop.
+        while rclpy.ok():
+            rclpy.spin_once(self)
+            # Check if traveled of given distance based on time.
+            # self.get_logger().info(f"{start_time} {self.get_clock().now()} {duration}")
+            if self.get_clock().now() - start_time >= duration:
+                break
+
+            # Publish message.
+            self._cmd_pub.publish(twist_msg)
+
+        # Traveled the required distance, stop.
+        self.stop()
 
     def map_callback(self, msg):
         self.map = Grid(msg.data, msg.info.width, msg.info.height, msg.info.resolution)
@@ -127,10 +174,71 @@ class Plan(Node):
         self.occupancy_grid = msg
         print(f"Got map: {msg.info.width}x{msg.info.height}, resolution: {msg.info.resolution}")
 
+    # adapted from PA1 code
+    def move_along_sequence(self, poses):
+        
+        # check that sequence is recieved
+        if not poses:
+            print("No poses to move along.")
+            self.stop()
+            return
+        
+        # get info of start point
+        x = poses[0].pose.position.x
+        y = poses[0].pose.position.y = 1.0
+        
+        qx = poses[0].pose.orientation.x
+        qy = poses[0].pose.orientation.y 
+        qz = poses[0].pose.orientation.z 
+        qw = poses[0].pose.orientation.w 
+        (roll, pitch, yaw) = tf_transformations.euler_from_quaternion([qx, qy, qz, qw])
+        
+        for pose in poses[1:]:
+
+            # get info of next point in sequence
+            x_prime = pose.pose.position.x
+            print(pose.pose.position.x)
+            y_prime = pose.pose.position.y = 1.0
+            
+            qx_prime = pose.pose.orientation.x
+            qy_prime = pose.pose.orientation.y 
+            qz_prime = pose.pose.orientation.z 
+            qw_prime = pose.pose.orientation.w 
+            roll, pitch, yaw = tf_transformations.euler_from_quaternion([qx_prime, qy_prime, qz_prime, qw_prime])
+            
+            # relationship between current point and next point
+            dx = (x_prime - x)
+            dy = (y_prime - y)
+            distance = math.sqrt(dx**2 + dy**2)
+            print(distance)
+            corner_angle_between_points = math.atan2(dy, dx) 
+            rotation_angle = -1 * (corner_angle_between_points)
+            print("rotation angle", rotation_angle)
+            
+            # move
+            print("move")
+            self.rotate(rotation_angle)
+            move_duration = abs(distance / LINEAR_VELOCITY)
+            self.move_forward(move_duration)
+            
+            # update current position
+            now = rclpy.time.Time()
+            tf = self.tf_buffer.lookup_transform(MAP_FRAME_ID, BASE_LINK_FRAME_ID, now)
+            x = tf.transform.translation.x 
+            y = tf.transform.translation.y 
+            q = tf.transform.rotation
+            roll, pitch, yaw = tf_transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
+
+        # starting position
+        print(poses[0])
+        print("Finished moving along sequence")             
+    
     # adapted from class lecture code about transformation
     def find_start_pose(self):
         try:
             transform = self.tf_buffer.lookup_transform(MAP_FRAME_ID, BASE_LINK_FRAME_ID,  rclpy.time.Time(), rclpy.duration.Duration(seconds=1.0))
+            
+            # don't really need to worry about orientation here
             x = transform.transform.translation.x
             y = transform.transform.translation.y
             return (x, y)
@@ -314,14 +422,14 @@ class Plan(Node):
                 
             # get start pose
             start_pose = self.find_start_pose()
+            print(start_pose)
             if start_pose is None:
                 print("error getting start pose")
             
             path_poses = self.find_path(start_pose, goal_pos, algorithm=algorithm)
-            print("got here")
-            
-            
-            
+            print("following path")
+            self.move_along_sequence(path_poses)
+                       
 def main(args=None):
     rclpy.init(args=args)
     p = Plan()
@@ -332,15 +440,7 @@ def main(args=None):
     if p.occupancy_grid is not None:
         rclpy.spin_once(p)
         p.spin()
-        rclpy.spin_once(p)
         
-        # Comment: Now safe to call find_path, for example from (0,0) to (5,5)
-        # path_poses = p.find_path((1.0, 1.0), (4.0, 1.75), algorithm="BFS")
-        # print(f"Path length: {len(path_poses)}")
-        # print("Path poses:")
-        # for pose in path_poses:
-        #     print(f"Position: ({pose.pose.position.x}, {pose.pose.position.y}), Orientation: ({pose.pose.orientation.x}, {pose.pose.orientation.y}, {pose.pose.orientation.z}, {pose.pose.orientation.w})")
-
     rclpy.shutdown()
 
 if __name__ == "__main__":
