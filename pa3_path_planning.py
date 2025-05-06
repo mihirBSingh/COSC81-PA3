@@ -112,7 +112,6 @@ class Plan(Node):
 
     # adapted from PA0
     def move(self, linear_vel, angular_vel):
-        """Send a velocity command (linear vel in m/s, angular vel in rad/s)."""
         # Setting velocities.
         twist_msg = Twist()
 
@@ -122,7 +121,6 @@ class Plan(Node):
         
     # adapted from PA0
     def stop(self):
-        """Stop the robot."""
         twist_msg = Twist()
         self._cmd_pub.publish(twist_msg)
         
@@ -135,6 +133,7 @@ class Plan(Node):
         start_time = self.get_clock().now()
         while rclpy.ok():
             rclpy.spin_once(self)
+            
             # check if traveled given distance based on time
             if self.get_clock().now() - start_time >= duration:
                 break
@@ -144,7 +143,6 @@ class Plan(Node):
             
     # from lecture
     def move_forward(self, duration):
-        """Function to move_forward for a given duration."""
         # Setting velocities. 
         twist_msg = Twist()
         twist_msg.linear.x = LINEAR_VELOCITY
@@ -156,15 +154,15 @@ class Plan(Node):
         # Loop.
         while rclpy.ok():
             rclpy.spin_once(self)
-            # Check if traveled of given distance based on time.
-            # self.get_logger().info(f"{start_time} {self.get_clock().now()} {duration}")
+            
+            # check if traveled of given distance based on time.
             if self.get_clock().now() - start_time >= duration:
                 break
 
-            # Publish message.
+            # publish message.
             self._cmd_pub.publish(twist_msg)
 
-        # Traveled the required distance, stop.
+        # traveled the required distance, stop.
         self.stop()
 
     def map_callback(self, msg):
@@ -251,8 +249,7 @@ class Plan(Node):
         # if no map then get one
         if not self.map:
             print("had to get map")
-            self.map = Grid(self.occupancy_grid.data, self.occupancy_grid.info.width, 
-                           self.occupancy_grid.info.height, self.occupancy_grid.info.resolution)
+            self.map = Grid(self.occupancy_grid.data, self.occupancy_grid.info.width, self.occupancy_grid.info.height, self.occupancy_grid.info.resolution)
             self.map_origin = self.occupancy_grid.info.origin
 
         # convert world to grid coords
@@ -320,13 +317,13 @@ class Plan(Node):
             pose.header.stamp = self.get_clock().now().to_msg()
             pose.header.frame_id = self.map_frame_id
             
-            # Set position
+            # set position
             x, y = self.grid_to_world(row, col)
             pose.pose.position.x = x
             pose.pose.position.y = y
             pose.pose.position.z = 0.0
 
-            # Set orientation (pointing to next point, last point keeps previous orientation)
+            # set the orientation (pointing to next point, last point keeps previous orientation)
             if i < len(path) - 1:
                 next_x, next_y = self.grid_to_world(path[i + 1][0], path[i + 1][1])
                 angle = np.arctan2(next_y - y, next_x - x)
@@ -337,7 +334,7 @@ class Plan(Node):
                 pose.pose.orientation.z = quaternion[2]
                 pose.pose.orientation.w = quaternion[3]      
             else:
-                # Use previous orientation for last point
+                # use the previous orientation for last point
                 quaternion = poses[-1].pose.orientation if poses else tf_transformations.quaternion_from_euler(0, 0, 0)
             
                 pose.pose.orientation.x = quaternion.x
@@ -354,13 +351,13 @@ class Plan(Node):
     
     # sequence of poses for robot to go from start to goal position
     def publish_pose_sequence(self, poses):
-        # Publish the path as a PoseArray
+        # publish the sequence as a PoseArray
         pose_array_msg = PoseArray()
         pose_array_msg.header.stamp = self.get_clock().now().to_msg()
         pose_array_msg.header.frame_id = self.map_frame_id
         pose_array_msg.poses = [pose.pose for pose in poses]
         
-        # Print the poses for debugging
+        # print the poses for viewing
         for i, pose in enumerate(pose_array_msg.poses):
             print(f"Pose {i}: ({pose.position.x}, {pose.position.y}), Orientation: ({pose.orientation.x}, {pose.orientation.y}, {pose.orientation.z}, {pose.orientation.w})")
         print("pose array", len(pose_array_msg.poses))
