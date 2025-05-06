@@ -48,36 +48,24 @@ class Grid:
         return self.grid[r, c]
     
     def is_valid(self, r, c):
-        # check if outside boundaries first
+        # Check if (r, c) is out of bounds
         if r < 0 or r >= self.height or c < 0 or c >= self.width:
             return False
 
-        # check  current cell
+        # Check the current cell
         if self.cell_at(r, c) == 100:
             return False
 
-        # define offset neighbors to check
-        offsets = [
-            (GRID_OFFSET, GRID_OFFSET),
-            (GRID_OFFSET, 0),
-            (GRID_OFFSET, -GRID_OFFSET),
-            (0, GRID_OFFSET),
-            (0, -GRID_OFFSET),
-            (-GRID_OFFSET, -GRID_OFFSET),
-            (-GRID_OFFSET, 0),
-            (-GRID_OFFSET, GRID_OFFSET),
-        ]
+        # Check all cells within the GRID_OFFSET square
+        for dr in range(-GRID_OFFSET, GRID_OFFSET + 1):
+            for dc in range(-GRID_OFFSET, GRID_OFFSET + 1):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < self.height and 0 <= cc < self.width:
+                    if self.cell_at(rr, cc) == 100:
+                        return False
 
-        # check if any neighbor cell equals 100 (and is thus a wall)
-        for dr, dc in offsets:
-            rr, cc = r + dr, c + dc
-            # check boundaries here to avoid errors:
-            if 0 <= rr < self.height and 0 <= cc < self.width:
-                if self.cell_at(rr, cc) == 100:
-                    return False
-
-        # if all checks pass
         return True
+
 
 class Plan(Node):
     def __init__(self, map_frame_id=MAP_FRAME_ID, node_name=NODE_NAME, context=None):
@@ -183,55 +171,48 @@ class Plan(Node):
             self.stop()
             return
         
-        # get info of start point
-        x = poses[0].pose.position.x
-        y = poses[0].pose.position.y = 1.0
-        
-        qx = poses[0].pose.orientation.x
-        qy = poses[0].pose.orientation.y 
-        qz = poses[0].pose.orientation.z 
-        qw = poses[0].pose.orientation.w 
-        (roll, pitch, yaw) = tf_transformations.euler_from_quaternion([qx, qy, qz, qw])
-        
-        for pose in poses[1:]:
+        for i, target_pose in enumerate(poses):
+            # print(f"Moving to pose {i}: ({target_pose.pose.position.x:.3f}, {target_pose.pose.position.y:.3f})")
+            
+            while rclpy.ok():
+                # get current pose
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        MAP_FRAME_ID, BASE_LINK_FRAME_ID, rclpy.time.Time(), Duration(seconds=1.0))
+                    curr_x = transform.transform.translation.x
+                    curr_y = transform.transform.translation.y
+                    q = transform.transform.rotation
+                    curr_yaw = np.arctan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
+                except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                    print(f"Cannot get current pose: {e}")
+                    self.stop()
+                    return
 
-            # get info of next point in sequence
-            x_prime = pose.pose.position.x
-            print(pose.pose.position.x)
-            y_prime = pose.pose.position.y = 1.0
-            
-            qx_prime = pose.pose.orientation.x
-            qy_prime = pose.pose.orientation.y 
-            qz_prime = pose.pose.orientation.z 
-            qw_prime = pose.pose.orientation.w 
-            roll, pitch, yaw = tf_transformations.euler_from_quaternion([qx_prime, qy_prime, qz_prime, qw_prime])
-            
-            # relationship between current point and next point
-            dx = (x_prime - x)
-            dy = (y_prime - y)
-            distance = math.sqrt(dx**2 + dy**2)
-            print(distance)
-            corner_angle_between_points = math.atan2(dy, dx) 
-            rotation_angle = -1 * (corner_angle_between_points)
-            print("rotation angle", rotation_angle)
-            
-            # move
-            print("move")
-            self.rotate(rotation_angle)
-            move_duration = abs(distance / LINEAR_VELOCITY)
-            self.move_forward(move_duration)
-            
-            # update current position
-            now = rclpy.time.Time()
-            tf = self.tf_buffer.lookup_transform(MAP_FRAME_ID, BASE_LINK_FRAME_ID, now)
-            x = tf.transform.translation.x 
-            y = tf.transform.translation.y 
-            q = tf.transform.rotation
-            roll, pitch, yaw = tf_transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
+                # find angle to target
+                dx = target_pose.pose.position.x - curr_x
+                dy = target_pose.pose.position.y - curr_y
+                target_angle = np.arctan2(dy, dx)
+                angle_diff = (target_angle - curr_yaw + np.pi) % (2 * np.pi) - np.pi  # normalize to [-pi, pi]
 
-        # starting position
-        print(poses[0])
-        print("Finished moving along sequence")             
+                # find distance to target
+                distance = np.sqrt(dx**2 + dy**2)
+
+                # rotate
+                # if abs(angle_diff) > ANGLE_THRESHOLD:
+                #     print("asds")
+                self.rotate(angle_diff)
+                
+                # move forward if close enough in angle
+                if abs(angle_diff) <= ANGLE_THRESHOLD:
+                    if distance > DISTANCE_THRESHOLD:
+                        move_duration = distance / self.linear_velocity
+                        self.move_forward(move_duration)
+                    else:
+                        # print(f"Reached pose {i}")
+                        self.stop()
+                        break
+                
+                self.rate.sleep()       
     
     # adapted from class lecture code about transformation
     def find_start_pose(self):
