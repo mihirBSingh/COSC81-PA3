@@ -110,6 +110,7 @@ class Plan(Node):
         self.map_origin = None
         self.occupancy_grid = None
 
+    # adapted from PA0
     def move(self, linear_vel, angular_vel):
         """Send a velocity command (linear vel in m/s, angular vel in rad/s)."""
         # Setting velocities.
@@ -118,7 +119,8 @@ class Plan(Node):
         twist_msg.linear.x = linear_vel
         twist_msg.angular.z = angular_vel
         self._cmd_pub.publish(twist_msg)
-
+        
+    # adapted from PA0
     def stop(self):
         """Stop the robot."""
         twist_msg = Twist()
@@ -390,10 +392,12 @@ class Plan(Node):
             x = float(x)
             y = float(y)
             if x < 0 or x > 200 or y < 0 or y > 200:
-                print("Invalid goal position. Using default goal position (5, 5).")
+                print("Invalid goal position. Using default goal position (50, 50).")
+                
+                # divide by 10
                 x = 5.0
                 y = 5.0
-            goal_pos = (x, y)
+            goal_pos = (x/10.0, y/10.0)
             
             # get algorithm
             algorithm = input("Enter algorithm - choose 1 for BFS and 2 for DFS): ")
